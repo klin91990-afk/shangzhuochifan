@@ -70,7 +70,7 @@ SAVE_FILE = os.path.join(_save_dir(), "market_save.json")
 
 # 厨房默认有的调味品（不用买）
 KITCHEN_DEFAULTS = [
-    {"name": "葱", "quality": "ok", "qty": 1},
+    {"name": "大葱", "quality": "ok", "qty": 1},
     {"name": "姜", "quality": "ok", "qty": 1},
     {"name": "蒜", "quality": "ok", "qty": 1},
     {"name": "盐", "quality": "ok", "qty": 1},
@@ -539,21 +539,22 @@ class MarketGame:
         for sid in list(self.affection.keys()):
             old = self.affection[sid]
             if old > 0:
-                decay = 1 if old < 50 else 0.5 if old < 80 else 0.2
+                decay = 1 if old < 50 else 0.5 if old < 79 else 0.2
                 self.affection[sid] = max(0, old - decay)
 
         # 每日状态roll——每个摊主今天的心情/状态不一样
         self._owner_daily = {}
+        self._daily_chat_gain = set()  # 重置每日聊天好感冷却
         for stall in STALLS:
             sid = stall["id"]
             r = (self.rng() % 100) / 100
-            if r < 0.30:
+            if r < 0.50:
                 self._owner_daily[sid] = "normal"      # 正常
-            elif r < 0.50:
+            elif r < 0.65:
                 self._owner_daily[sid] = "good"         # 心情好
-            elif r < 0.70:
+            elif r < 0.78:
                 self._owner_daily[sid] = "bad"          # 心情差
-            elif r < 0.85:
+            elif r < 0.90:
                 self._owner_daily[sid] = "distracted"   # 分心了
             else:
                 self._owner_daily[sid] = "unwell"       # 不舒服
@@ -754,15 +755,18 @@ class MarketGame:
 
         # ── 限时奇遇 ──
         encounter_lines = []
+        basket_before = len(self.basket)
         for te in self._check_timed_encounters():
             encounter_lines.append(f"✨ {te['text']}")
             reward = te.get("reward", {})
             if reward.get("rare_boost"):
                 encounter_lines.append("   （今天更容易遇到稀有好东西了。）")
             if reward.get("random_quality_item") or reward.get("free_quality_item"):
-                gift = self.basket[-1] if self.basket else None
-                if gift:
-                    encounter_lines.append(f"   获得了：{gift['name']}")
+                # 取这次奇遇新增的物品（不是basket[-1]，可能被后续奇遇覆盖）
+                new_items = self.basket[basket_before:]
+                basket_before = len(self.basket)
+                if new_items:
+                    encounter_lines.append(f"   获得了：{new_items[-1]['name']}")
 
         # 增量输出——同摊二次进入只给变化
         is_revisit = (self._last_stall == stall_id)
@@ -791,7 +795,14 @@ class MarketGame:
                 f"溜达一圈又回到{stall['name']}。{stall['owner']}冲你点了点头。",
                 f"{stall['name']}还是那几样，{stall['owner']}正给菜喷水，见你回来笑了笑。",
             ]
-            return f"{revisits[self.rng() % len(revisits)]}\n💰 剩余：{money_left}元\n📖 " + self._status_bar()
+            result = f"{revisits[self.rng() % len(revisits)]}"
+            # 里程碑和奇遇在revisit时也要显示（副作用已在上面生效）
+            if milestone_lines:
+                result += "\n" + "\n".join(milestone_lines)
+            if encounter_lines:
+                result += "\n" + "\n".join(encounter_lines)
+            result += f"\n💰 剩余：{money_left}元\n📖 " + self._status_bar()
+            return result
 
         lines = []
 
@@ -973,6 +984,10 @@ class MarketGame:
                 v = VEGGIES[vname]
                 cached = self._stall_item_cache[vname]
                 price = cached["price"]
+                # 展示价格含天气加价，和实际购买一致
+                wpmod = getattr(self, '_weather_price_mod', 1.0)
+                if wpmod > 1.0:
+                    price = round(price * wpmod, 1)
                 quality = cached["quality"]
 
                 if COMPACT_MODE:
@@ -1070,6 +1085,9 @@ class MarketGame:
 
     def visit_zone(self, zone_name):
         """逛某个分区——L2信息层，品质水位+价格梯度+摊位列表"""
+        if self._market_closed:
+            return "⏰ 菜场收摊了。「回家」吧。"
+        self._tick_time(1)
         zone = ZONE_NAV.get(zone_name)
         if not zone:
             # 尝试模糊匹配
@@ -1166,8 +1184,8 @@ class MarketGame:
         if not stall:
             return f"今天没有摊子卖「{item_name}」。"
 
-        # 检查是否已经买了（砍价成功也算买了）
-        if any(b["name"] == item_name for b in self.basket):
+        # 检查是否已经主动买过（赠送的不挡）
+        if any(b["name"] == item_name and not b.get("_free") for b in self.basket):
             return f"「{item_name}」已经买了，在篮子里。"
 
         # 优先从缓存取，没有则现场算
@@ -1199,16 +1217,28 @@ class MarketGame:
         if price > money_left and can_owe:
             pass  # 下面买了之后再提醒
 
-        # 分量坑——额外费用（4级熟客/识秤技能免疫）
+        # 各种坑的费用——基于原始price算，避免复利叠加
+        base_price = price  # 保存原始价格，所有trick基于此计算
         weight_extra = 0
         if regular_tier < 4 and "scale_sense" not in self.unlocked_skills:
             if hasattr(self, '_current_weight_trick') and self._current_weight_trick:
                 trick = self._current_weight_trick
-                weight_extra = round(price * trick["extra_cost_pct"], 1)
-                price += weight_extra
+                weight_extra = round(base_price * trick["extra_cost_pct"], 1)
                 self._current_weight_trick = None  # 只触发一次
         else:
             self._current_weight_trick = None
+
+        # 单位陷阱——基于base_price算
+        unit_extra = 0
+        unit_trick_hit = None
+        for ut in UNIT_TRICKS:
+            if ut["item"] == item_name and regular_tier < 1 and (self.rng() % 100) / 100 < 0.2:
+                unit_extra = round(base_price * (ut["multiplier"] - 1), 1)
+                unit_trick_hit = ut
+                break
+
+        # 总价 = 原价 + 各种额外费用
+        price = base_price + weight_extra + unit_extra
 
         self.spent = round(self.spent + price, 1)
         self.basket.append({
@@ -1243,18 +1273,8 @@ class MarketGame:
         lines.append(f"买了 {item_name} {_fq(qty)}{v['unit']}，{price}元。")
         if weight_extra > 0:
             lines.append(f"（{trick['hint']}，比预期多花了{weight_extra}元。）")
-
-        # 单位陷阱——部分摊主报价不说单位，听着便宜实际贵
-        unit_trick_hit = None
-        for ut in UNIT_TRICKS:
-            if ut["item"] == item_name and regular_tier < 1 and (self.rng() % 100) / 100 < 0.2:
-                extra = round(price * (ut["multiplier"] - 1), 1)
-                price += extra
-                self.spent = round(self.spent + extra, 1)
-                self.basket[-1]["price"] = price
-                unit_trick_hit = ut
-                lines.append(f"⚠ {ut['hint']}。实际{price}元。")
-                break
+        if unit_extra > 0:
+            lines.append(f"⚠ {unit_trick_hit['hint']}。实际{price}元。")
 
         # 出成率提示——低出成率的菜提醒一下
         yield_pct = YIELD_PCT.get(item_name, 100)
@@ -1289,7 +1309,7 @@ class MarketGame:
                 free_name = bt["free"]
                 if free_name not in [b["name"] for b in self.basket]:
                     self.basket.append({"name": free_name, "quality": bt["free_quality"],
-                                        "qty": 1, "price": 0, "stall": stall["id"], "owner": stall["owner"]})
+                                        "qty": 1, "price": 0, "stall": stall["id"], "owner": stall["owner"], "_free": True})
                     lines.append(f"{stall['owner']}：{bt['says']} → 送了{free_name}！")
                     if bt["free_quality"] in ("bad", "trap"):
                         lines.append(f"（{bt['catch']}）")
@@ -1299,7 +1319,7 @@ class MarketGame:
         if self.visit_count.get(stall["id"], 0) >= 3 and "大葱" not in [b["name"] for b in self.basket]:
             if self.rng() % 3 == 0:
                 lines.append(f"{stall['owner']}：给你搭根葱！")
-                self.basket.append({"name": "大葱", "quality": "good", "qty": 1, "price": 0, "stall": stall["id"], "owner": stall["owner"]})
+                self.basket.append({"name": "大葱", "quality": "good", "qty": 1, "price": 0, "stall": stall["id"], "owner": stall["owner"], "_free": True})
 
         # 好感度——买东西涨
         profile = NPC_PROFILES.get(stall["id"])
@@ -1357,6 +1377,9 @@ class MarketGame:
         season_status = v["season"].get(self.season, "no")
         if season_status == "no":
             return f"「{item_name}」这个季节没有。"
+
+        if any(b["name"] == item_name for b in self.basket):
+            return f"你已经买了「{item_name}」，不用再砍了。"
 
         if stall_id:
             stall = self._find_stall(stall_id)
@@ -1439,7 +1462,7 @@ class MarketGame:
         if hasattr(self, '_disaster_bargain_bonus') and self._disaster_bargain_bonus:
             base_chance += self._disaster_bargain_bonus
 
-        # 策略修正——AI的话术影响成功率
+        # 策略修正——AI的话术影响成功率（只取最强匹配的一个策略）
         if tactic:
             for strat_id, strat in BARGAIN_STRATEGIES.items():
                 for kw in strat["keywords"]:
@@ -1452,6 +1475,9 @@ class MarketGame:
                         if strat_id == "装走" and personality == "死硬":
                             base_chance -= 0.10
                         break
+                else:
+                    continue
+                break  # 匹配到一个策略就停，不叠加
 
         # 砍价太离谱直接翻车
         if tactic and any(w in tactic for w in ["白送", "免费", "一分钱", "一毛"]):
@@ -1465,7 +1491,7 @@ class MarketGame:
         self._tick_time(1)
         if roll < base_chance:
             # 砍价成功
-            discount = round(price * (0.1 + (self.rng() % 20) / 100), 1)
+            discount = round(price * (0.1 + (self.rng() % 25) / 100), 1)
             new_price = round(price - discount, 1)
             if new_price < 0.5:
                 new_price = max(0.5, round(price * 0.8, 1))
@@ -1654,6 +1680,9 @@ class MarketGame:
             "completed_steps": set(),  # 已完成的步骤id
             "completed_optional": set(),  # 已完成的可选步骤id
             "completed_dishes": [],  # 已盛出的菜 [{name, items, score}]
+            "_on_board": set(),      # 案板上的食材
+            "held_items": [],        # 盛出的菜品（未入completed_dishes）
+            "_salt_count": 0,        # 盐计数
         }
         return "\n".join(lines)
 
@@ -1685,6 +1714,7 @@ class MarketGame:
         ks["completed_optional"] = set()
         ks["quality_score"] = 0
         ks["burned"] = False
+        ks["_salt_count"] = 0
 
         lines = []
         lines.append(f"开始做{dish_name}。")
@@ -1721,12 +1751,33 @@ class MarketGame:
             return "怎么做？「做法 番茄切块炒出汁，鸡蛋打散先炒再放回去，加盐出锅」"
 
         ks = self.kitchen_state
+        # 快做模式也设菜名——先从食材推测，后续recipe发现会覆盖
+        if not ks.get("dish_name"):
+            all_items = list(self.fridge) + list(self.basket) + KITCHEN_DEFAULTS
+            all_names = {item["name"] for item in all_items}
+            best_match = None
+            best_score = 0
+            for rname, rdata in RECIPES.items():
+                ingredients = rdata.get("ingredients", [])
+                if not ingredients:
+                    continue
+                score = sum(1 for ing in ingredients if ing in all_names)
+                if score > best_score:
+                    best_score = score
+                    best_match = rname
+            if best_match and best_score >= len(RECIPES[best_match].get("ingredients", [])) - 1:
+                ks["dish_name"] = best_match
+                ks["recipe"] = RECIPES[best_match]
+                ks.setdefault("completed_steps", set())
+                ks.setdefault("completed_optional", set())
+            else:
+                ks["dish_name"] = approach_text[:10] + "…" if len(approach_text) > 10 else approach_text
         _seasoning = {"盐", "酱油", "醋", "糖", "料酒", "淀粉", "油", "水", "大葱"}
 
         # 解析做法里的步骤——用句号/逗号/然后/接着/最后 分割
         # 注意：不用"再"和"先"分割——"先炒蛋再放回去"是一整步
         import re
-        parts = re.split(r'[。，、；然后接着最后]', approach_text)
+        parts = re.split(r'[。，、；]|然后|接着|最后', approach_text)
         parts = [p.strip() for p in parts if p.strip()]
 
         if not parts:
@@ -1771,7 +1822,7 @@ class MarketGame:
                     if insert_pos >= 0:
                         # 在动词后面插入食材名
                         verb_char = step_full[insert_pos]
-                        step_full = step_full[:insert_pos+1] + "".join(unhandled) + step_full[insert_pos+1:]
+                        step_full = step_full[:insert_pos+1] + "、".join(unhandled) + step_full[insert_pos+1:]
 
             # 调用cook_step
             result = self.cook_step(step_full)
@@ -1828,12 +1879,13 @@ class MarketGame:
         feedback = []
 
         # ── 锅的自然流逝 ──
-        # 开着火不操作，食材继续变熟——超过阈值就糊
+        # 开着火时食材缓慢变熟——超过阈值就糊
         # 案板上的食材（_on_board）不在锅里，不受热
+        # 注意：烹饪步骤由_progress_doneness推进主要熟度，这里只加背景微热
         if ks.get("heat", 0) > 0:
             _seasoning = {"盐", "酱油", "醋", "糖", "料酒", "淀粉", "油", "水", "大葱"}
             _on_board = ks.get("_on_board", set())
-            tick = ks["heat"] * 5  # 小火+5/步，中火+10/步，大火+15/步
+            tick = ks["heat"] * 2  # 小火+2/步，中火+4/步，大火+6/步（背景微热）
             for name in ks.get("item_state", {}):
                 if name in _seasoning:
                     continue
@@ -1866,16 +1918,22 @@ class MarketGame:
         kept = []
         used_spans = []  # (start, end) 已占用的位置
         for verb, tag in detected:
-            idx = step_text.index(verb)
-            span = (idx, idx + len(verb))
-            dominated = False
-            for s, e in used_spans:
-                if s <= span[0] and span[1] <= e:
-                    dominated = True
+            # 找第一个不被支配的位置（处理重复动词）
+            start = 0
+            idx = -1
+            while True:
+                idx = step_text.find(verb, start)
+                if idx == -1:
                     break
-            if not dominated:
-                kept.append((verb, tag))
-                used_spans.append(span)
+                span = (idx, idx + len(verb))
+                dominated = any(s <= span[0] and span[1] <= e for s, e in used_spans)
+                if not dominated:
+                    break
+                start = idx + 1
+            if idx == -1:
+                continue
+            kept.append((verb, tag))
+            used_spans.append(span)
         detected = kept
         # 去重2：同tag只保留最长动词，season例外（可加多种调料）
         tag_groups = {}
@@ -2001,7 +2059,7 @@ class MarketGame:
                         ks["item_state"][item["name"]] = 0
                     # 暗坑——切/洗时才发现内部问题
                     if item.get("quality") == "trap" and item["name"] in CUTTING_TRAP:
-                        if verb in ("切", "洗", "剥", "切块", "切片", "切丝", "拍"):
+                        if verb in ("切", "洗", "剥", "切块", "切片", "切丝", "切段", "切丁", "切末", "拍", "拍碎", "沥干", "打散"):
                             trap_msg = CUTTING_TRAP[item["name"]]
                             feedback.append(f"⚠ {trap_msg}")
                             ks["quality_score"] -= 3
@@ -2116,9 +2174,10 @@ class MarketGame:
                 for obs in observations:
                     feedback.append(obs)
 
-                # 糊了判定——基于item_state
+                # 糊了判定——基于item_state，统一用burn_threshold
+                burn_at = self._burn_threshold()
                 for name, d in ks.get("item_state", {}).items():
-                    if d >= 90 and not ks.get("burned"):
+                    if d >= burn_at and not ks.get("burned"):
                         ks["burned"] = True
                         ks["quality_score"] -= 5
                         break
@@ -2153,20 +2212,20 @@ class MarketGame:
 
             elif tag == "season":
                 ks["seasoning"].append(verb)
-                ks["quality_score"] += 1
+                # 前3次调味加分，之后不加了（防止刷分）
+                if len(ks["seasoning"]) <= 3:
+                    ks["quality_score"] += 1
+                elif len(ks["seasoning"]) > 5:
+                    ks["quality_score"] -= 1  # 调太多反而扣分
                 season_fb = {"加盐": "加盐。", "加酱油": "加酱油。", "加醋": "加醋。", "加糖": "加糖。",
                              "加料酒": "加料酒。", "加蚝油": "加蚝油。", "加淀粉": "勾芡。", "调味": "调味。"}
                 feedback.append(season_fb.get(verb, "调味。"))
-                # ── 补救机制 ──
-                # 太咸了可以加水/加糖补救
+                # 盐计数
                 if "加盐" in step_text or "加酱油" in step_text:
                     ks["_salt_count"] = ks.get("_salt_count", 0) + 1
                     if ks["_salt_count"] >= 3:
                         feedback.append("⚠ 有点咸了。可以加勺水或加点糖压一压。")
-                if "加水" in step_text and ks.get("_salt_count", 0) >= 2:
-                    ks["_salt_count"] = max(0, ks["_salt_count"] - 1)
-                    ks["quality_score"] += 1
-                    feedback.append("加了水，咸味淡了一点。还行。")
+                # 加糖补救咸味（可以在season步骤里同时加）
                 if "加糖" in step_text and ks.get("_salt_count", 0) >= 2:
                     ks["_salt_count"] = max(0, ks["_salt_count"] - 1)
                     ks["quality_score"] += 1
@@ -2236,10 +2295,22 @@ class MarketGame:
                     dish_name = ks.get("dish_name") or "炒菜"
                     dish_items = list(held)
                     dish_score = ks.get("quality_score", 0)
+                    # 算品相
+                    if dish_score >= 10:
+                        dish_app = "great"
+                    elif dish_score >= 5:
+                        dish_app = "good"
+                    elif dish_score >= 0:
+                        dish_app = "ok"
+                    elif dish_score >= -5:
+                        dish_app = "bad"
+                    else:
+                        dish_app = "terrible"
                     ks["completed_dishes"].append({
                         "name": dish_name,
                         "items": dish_items,
                         "score": dish_score,
+                        "appearance": dish_app,
                     })
                     feedback.append(f"「{dish_name}」盛出装盘。锅空了——接着做下一道？")
                     # 重置锅的状态，准备做下一道
@@ -2397,8 +2468,13 @@ class MarketGame:
                 # 追踪最近有没有推进
                 if not hasattr(self, '_stall_cook_count'):
                     self._stall_cook_count = 0
-                if ks.get("completed_steps") and ks["steps"] and \
-                   any(s["id"] in ks["completed_steps"] for s in recipe["required"] if ks["steps"][-1]):
+                # 检查最后一步是否推进了recipe
+                last_step_advanced = False
+                if ks.get("completed_steps") and ks.get("steps"):
+                    last_step_id = ks["steps"][-1] if isinstance(ks["steps"][-1], str) else None
+                    if last_step_id and last_step_id in ks["completed_steps"]:
+                        last_step_advanced = any(s["id"] == last_step_id for s in recipe["required"])
+                if last_step_advanced:
                     self._stall_cook_count = 0  # 推进了，重置
                 else:
                     self._stall_cook_count += 1
@@ -2454,15 +2530,31 @@ class MarketGame:
         cookable = [n for n in ks.get("pot_contents", []) if n not in _seasoning]
         if not cookable and not ks.get("completed_dishes"):
             return "锅里什么都没有，先做菜再出锅。"
-        # 锅空了但之前盛出了菜——直接端上桌
+        # 锅空了但之前盛出了菜——汇总分数后端上桌
         if not cookable and ks.get("completed_dishes"):
+            # 累加之前菜的分数
+            total_score = ks.get("quality_score", 0)
+            for prev in ks["completed_dishes"]:
+                total_score += prev.get("score", 0)
+            if total_score >= 10:
+                appearance = "great"
+            elif total_score >= 5:
+                appearance = "good"
+            elif total_score >= 0:
+                appearance = "ok"
+            elif total_score >= -5:
+                appearance = "bad"
+            else:
+                appearance = "terrible"
             lines = []
             lines.append("──── 今天的饭 ────")
-            lines.append("端上桌了。")
+            appear_desc = self._appearance_desc("这顿饭", appearance, ks)
+            lines.append(appear_desc)
             for prev in ks["completed_dishes"]:
                 prev_name = prev.get("name", "炒菜")
                 prev_items = "、".join(prev.get("items", []))
-                lines.append(f"  {prev_name}（{prev_items}）")
+                prev_app = prev.get("appearance", "ok")
+                lines.append(f"  {prev_name}（{prev_items}）{prev_app}")
             self.done = True
             self.save()
             lines.append("")
@@ -2915,7 +3007,7 @@ class MarketGame:
             # 慢炖是时间驱动，火候不重要——小火慢炖照样烂
             heat_mult = 1.0
         else:
-            heat_mult = {1: 0.5, 2: 1.0, 3: 1.5}.get(ks["heat"], 0)
+            heat_mult = {1: 0.5, 2: 1.0, 3: 1.5}.get(ks["heat"], 1.0)
         # 每个食材推进——案板上的不受热
         _seasoning_names = {"盐", "酱油", "醋", "糖", "料酒", "淀粉", "油", "水", "大葱"}
         _on_board = ks.get("_on_board", set())
@@ -2967,17 +3059,14 @@ class MarketGame:
         return ""
 
     def _pot_smell(self, ks):
-        """锅的气味"""
+        """锅的气味——与_doneness_stage对齐"""
         states = ks.get("item_state", {})
         if not states:
             return ""
         max_d = max(states.values()) if states else 0
-        if max_d <= 15: return POT_SMELLS["raw"]
-        if max_d <= 30: return POT_SMELLS["starting"]
-        if max_d <= 60: return POT_SMELLS["cooking"]
-        if max_d <= 80: return POT_SMELLS["done"]
-        if max_d <= 90: return POT_SMELLS["over"]
-        return POT_SMELLS["burnt"]
+        stage = self._doneness_stage(max_d)
+        smell_map = {0: "raw", 1: "starting", 2: "cooking", 3: "done", 4: "over", 5: "burnt"}
+        return POT_SMELLS.get(smell_map.get(stage, "raw"), "")
 
     def _pot_sensory_desc(self, ks):
         """生成锅里感官快照——每步底部显示"""
@@ -2985,13 +3074,22 @@ class MarketGame:
             return ""
         lines = []
         _seasoning_names = {"盐", "酱油", "醋", "糖", "料酒", "淀粉", "油", "水", "大葱"}
+        # 案板食材排除
+        _on_board = ks.get("_on_board", set())
         # 每个食材的感官
         for name in ks["pot_contents"]:
             if name in _seasoning_names:
                 continue
+            if name in _on_board:
+                continue  # 案板上的不显示锅里状态
             d = ks.get("item_state", {}).get(name, 0)
             desc = self._item_sensory(name, d)
             lines.append(f"  {name}：{desc}")
+        # 案板上的单独显示
+        if _on_board:
+            for name in _on_board:
+                if name in ks["pot_contents"]:
+                    lines.append(f"  {name}：在案板上")
         # 水/汤单独写
         if "水" in ks.get("pot_contents", []):
             if ks["heat"] >= 2:
@@ -3121,11 +3219,14 @@ class MarketGame:
         seasoning_list = ks.get("seasoning", [])
         salt_count = seasoning_list.count("加盐")
         soy_count = seasoning_list.count("加酱油")
+        # "调味"通用词也贡献咸味（相当于加了一次盐）
+        generic_season = seasoning_list.count("调味")
+        total_salty = salt_count + soy_count + generic_season
         if not seasoning_list:
             notes.append("没调味——淡的")
-        elif salt_count >= 3 or soy_count >= 3 or (salt_count + soy_count) >= 4:
+        elif total_salty >= 4:
             notes.append("太咸了")
-        elif salt_count == 2 and "加酱油" not in seasoning_list:
+        elif total_salty >= 3:
             notes.append("有点咸了")
         elif len(seasoning_list) <= 1:
             notes.append("调味单薄")
@@ -3242,6 +3343,8 @@ class MarketGame:
         return "、".join(parts)
 
     def _find_stall(self, stall_id):
+        if not stall_id:
+            return None
         stall = STALL_BY_ID.get(stall_id)
         if stall:
             return stall
@@ -3558,8 +3661,7 @@ class MarketGame:
         elif season_status == "ok":
             price *= 1.2  # 非当季贵一点
 
-        if self.weather == "雨":
-            price += 1 + (self.rng() % 20) / 10
+        # 雨天加价统一走_weather_price_mod，不在_calc_price重复加
 
         # 散市便宜
         tod = TIME_OF_DAY.get(self.time_of_day, {})
@@ -4526,16 +4628,26 @@ class MarketGame:
         lines = []
         lines.append(f"你拿着{item_name}去市场门口的公平秤复称——")
 
-        # 判断是否被坑了分量
-        was_tricked = False
-        # 检查买的时候有没有分量坑（用stall字段回查）
-        stall = self._find_stall(target_item.get("stall", ""))
+        # 已经复称过，直接返回缓存结果
+        if target_item.get("_fair_scale_checked"):
+            if target_item.get("_fair_scale_short"):
+                lines.append(f"⚠ 秤显示：不足秤！{item_name}实际少了约两成。")
+                lines.append(f"（可以「退 {item_name}」退货退钱，或自己留着。）")
+            else:
+                lines.append(f"秤显示：足斤足两，{item_name}分量没问题。")
+            return "\n".join(lines)
+
+        # 判断是否被坑了分量——用实际购买时记录的数据
+        was_tricked = bool(target_item.get("weight_trick_extra", 0) > 0)
+        # 如果不是4级熟客/没识秤技能，且没被实际坑过，仍可能发现隐性问题
         regular_tier = self._get_regular_tier(target_item.get("stall", ""))
-        # 如果不是4级熟客/没识秤技能，且有分量坑历史
-        if regular_tier < 4 and "scale_sense" not in self.unlocked_skills:
-            # 用rng判断——30%概率缺秤
-            if (self.rng() % 100) / 100 < 0.3:
+        if not was_tricked and regular_tier < 4 and "scale_sense" not in self.unlocked_skills:
+            if (self.rng() % 100) / 100 < 0.15:
                 was_tricked = True
+
+        # 缓存结果
+        target_item["_fair_scale_checked"] = True
+        target_item["_fair_scale_short"] = was_tricked
 
         if was_tricked:
             lines.append(f"⚠ 秤显示：不足秤！{item_name}实际少了约两成。")
@@ -4733,6 +4845,13 @@ class MarketGame:
                     p["fears"][vname] = text
                     self.save()
                     return f"记住了：{text}"
+            # 模糊匹配
+            for word in text.replace("怕", "").replace("她", "").replace("的", "").strip().split():
+                matched = self._fuzzy_match_item(word)
+                if matched:
+                    p["fears"][matched] = text
+                    self.save()
+                    return f"记住了：{text}"
             return "怕什么？「记得 她怕鲫鱼刺多」"
 
         if "爱吃" in text or "喜欢" in text or "爱喝" in text:
@@ -4771,10 +4890,19 @@ class MarketGame:
         text = text.strip()
         p = self.palate
         removed = False
+        # 精确匹配
         for category in ("dislikes", "loves", "fears", "texture"):
             if text in p[category]:
                 del p[category][text]
                 removed = True
+        # 模糊匹配
+        if not removed:
+            matched = self._fuzzy_match_item(text)
+            if matched:
+                for category in ("dislikes", "loves", "fears", "texture"):
+                    if matched in p[category]:
+                        del p[category][matched]
+                        removed = True
         if removed:
             self.save()
             return f"忘了关于{text}的记忆。"
@@ -4800,16 +4928,20 @@ class MarketGame:
             fb_list = fb_list[-5:]
         self.dish_feedback[dish_name] = fb_list
         self.save()
-        # 她说了不好的——可能要记住口味偏好
+        # 她说了不好的——记住口味偏好
         auto_note = ""
         if "太咸" in text or "咸了" in text:
             auto_note = "\n（记住了——下次少放盐。）"
+            self.palate.setdefault("seasoning", {})["salty"] = "light"
         elif "太淡" in text or "没味" in text:
             auto_note = "\n（记住了——下次多放点盐。）"
+            self.palate.setdefault("seasoning", {})["salty"] = "heavy"
         elif "老了" in text or "柴了" in text or "过火" in text:
             auto_note = "\n（记住了——下次火小点。）"
+            self.palate.setdefault("texture", {})["doneness"] = "tender"
         elif "没熟" in text or "生的" in text:
             auto_note = "\n（记住了——下次多煮一会儿。）"
+            self.palate.setdefault("texture", {})["doneness"] = "well_done"
         return f"她说了——{text}。记住了。{auto_note}"
 
     def _state_command(self, text):
@@ -4980,32 +5112,9 @@ class MarketGame:
         if instruction.startswith("做 "):
             dish_name = instruction[2:].strip()
             if self.kitchen_state:
-                self.kitchen_state["dish_name"] = dish_name
-                # 加载菜谱骨架
-                recipe = RECIPES.get(dish_name)
-                # 检查隐藏菜谱
-                if not recipe and dish_name in HIDDEN_RECIPES:
-                    if dish_name in self.unlocked_hidden_recipes:
-                        recipe = HIDDEN_RECIPES[dish_name]
-                    else:
-                        return f"你不会做「{dish_name}」。也许某天会有人教你。"
-                if recipe:
-                    self.kitchen_state["recipe"] = recipe
-                    # 只显示食材和已完成步骤，不剧透后续
-                    ingredients = recipe.get("ingredients", [])
-                    ing_str = "、".join(ingredients) if ingredients else "看看手头有什么"
-                    done_str = ""
-                    completed = self.kitchen_state.get("completed_steps", set())
-                    if completed:
-                        done_names = []
-                        for s in recipe["required"]:
-                            if s["id"] in completed:
-                                done_names.append(f"✅{s['name']}")
-                        if done_names:
-                            done_str = f"\n已完成：{' '.join(done_names)}"
-                    return f"做{dish_name}。食材：{ing_str}。灶台前了，开始吧。{done_str}"
-                else:
-                    return f"做{dish_name}。没有固定步骤，自由发挥。写第一步吧。"
+                return self.start_dish(dish_name)
+            else:
+                return "还没进厨房。先用「回家」。"
 
         # 做法——一句话描述做法，引擎自动推
         if instruction.startswith("做法 ") or instruction.startswith("我来做 "):
@@ -5432,7 +5541,7 @@ class MarketGame:
         self.current_stall = area_id
         lines = [f"─── {area['name']} ───", area["desc"], "", f"{area['owner']}：{area['catchphrase']}", ""]
         for vname in area["sells"]:
-            if self.season not in VEGGIES.get(vname, {}).get("season", {}):
+            if VEGGIES.get(vname, {}).get("season", {}).get(self.season) == "no":
                 continue
             v = VEGGIES[vname]
             base = v["price"][1]
@@ -5503,6 +5612,15 @@ class MarketGame:
             if ok:
                 self.unlocked_secrets.add(aid)
                 self.encyclopedia["areas_found"].add(aid)
+                # 处理秘密区域奖励
+                reward = area.get("reward", {})
+                if reward.get("recipe"):
+                    rname = reward["recipe"]
+                    if rname not in self.unlocked_hidden_recipes:
+                        self.unlocked_hidden_recipes.add(rname)
+                        self.encyclopedia["recipes_unlocked"].add(rname)
+                if reward.get("perk"):
+                    self._perks.add(reward["perk"])
                 newly_unlocked.append(area)
         return newly_unlocked
 
@@ -5537,7 +5655,11 @@ class MarketGame:
 
     def _check_timed_encounters(self):
         triggered = []
+        already = self.encyclopedia.get("encounters_triggered", set())
         for te in TIMED_ENCOUNTERS:
+            # 同一天内同一奇遇不重复触发
+            if te["id"] in already:
+                continue
             cond = te["condition"]
             ok = True
             if cond.get("weather") and self.weather != cond["weather"]:

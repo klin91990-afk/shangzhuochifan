@@ -88,6 +88,51 @@ def mulberry32(seed):
     return _next
 
 
+def _to_jsonable(obj):
+    """递归把不可JSON序列化的东西转成可序列化的。"""
+    if isinstance(obj, set):
+        return {'__t': 'set', 'v': sorted(obj, key=str)}
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    if isinstance(obj, float):
+        return round(obj, 4)
+    return obj
+
+
+def _from_jsonable(obj):
+    """反序列化。"""
+    if isinstance(obj, dict):
+        if obj.get('__t') == 'set':
+            return set(_from_jsonable(x) for x in obj.get('v', []))
+        return {k: _from_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_from_jsonable(x) for x in obj]
+    return obj
+
+
+def _restore_sets(obj):
+    """kitchen_state里的set字段还原。"""
+    _SET_KEYS = {"completed_steps", "completed_optional", "_on_board", "discovered_recipes"}
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            if k in _SET_KEYS:
+                if isinstance(v, list):
+                    result[k] = set(v)
+                elif isinstance(v, dict) and v.get('__t') == 'set':
+                    result[k] = set(v.get('v', []))
+                else:
+                    result[k] = _restore_sets(v)
+            else:
+                result[k] = _restore_sets(v)
+        return result
+    if isinstance(obj, list):
+        return [_restore_sets(x) if isinstance(x, (dict, list)) else x for x in obj]
+    return obj
+
+
 class MarketGame:
     def __init__(self):
         self.rng = mulberry32(0)
@@ -239,7 +284,7 @@ class MarketGame:
             "rt_journey_shown": self._journey_shown,
             "rt_journey_text": self._journey_text,
             "rt_done": self.done,
-            "rt_kitchen_state": self.kitchen_state,
+            "rt_kitchen_state": _to_jsonable(self.kitchen_state),
             "rt_cooking_log": self.cooking_log,
             "rt_plate": self.plate,
             "rt_rng_state": self.rng.__closure__[0].cell_contents,
@@ -380,7 +425,7 @@ class MarketGame:
             self._journey_shown = data.get("rt_journey_shown", False)
             self._journey_text = data.get("rt_journey_text", "")
             self.done = data.get("rt_done", False)
-            self.kitchen_state = data.get("rt_kitchen_state")
+            self.kitchen_state = _restore_sets(_from_jsonable(data.get("rt_kitchen_state"))) if data.get("rt_kitchen_state") else None
             self.cooking_log = data.get("rt_cooking_log", [])
             self.plate = data.get("rt_plate")
             # 恢复灾难状态

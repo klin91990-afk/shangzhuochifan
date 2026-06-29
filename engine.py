@@ -154,6 +154,11 @@ def _snapshot(game):
         state['_kitchen_state'] = None
     # PRNG状态
     state['_rng_state'] = _det_rng._state
+    # MarketGame内部rng闭包的当前seed
+    try:
+        state['_game_rng_seed'] = game.rng.__closure__[0].cell_contents
+    except (AttributeError, IndexError):
+        state['_game_rng_seed'] = game.seed
     return state
 
 
@@ -163,15 +168,20 @@ def _restore(game, state):
     if rng_state is not None:
         _det_rng.seed(rng_state)
 
+    # 恢复MarketGame内部rng闭包
+    game_rng_seed = state.pop('_game_rng_seed', None)
+    if game_rng_seed is not None:
+        from market_engine import mulberry32
+        game.rng = mulberry32(game_rng_seed)
+
     kitchen_data = state.pop('_kitchen_state', None)
-    # 从state里去掉不要恢复的临时属性
-    for attr in ('_yield_cache', '_owner_daily', '_today_disaster',
-                 '_disaster_price_mod', '_disaster_quality_mod',
-                 '_disaster_bargain_bonus', '_season_stall_items',
-                 '_stall_item_cache', '_rare_boost_today',
-                 '_neighbor_conflict', '_roof_leaking',
-                 '_journey_text', '_journey_shown'):
+    # 从state里去掉纯缓存属性（可以lazy重建）
+    for attr in ('_yield_cache', '_stall_item_cache'):
         state.pop(attr, None)
+    # 以下属性在同一天内跨cmd()必须保持，不pop
+    # _owner_daily, _today_disaster, _disaster_price_mod, _disaster_quality_mod,
+    # _disaster_bargain_bonus, _season_stall_items, _rare_boost_today,
+    # _neighbor_conflict, _roof_leaking, _journey_text, _journey_shown
 
     for attr, val in state.items():
         if attr in _SKIP_ATTRS:
