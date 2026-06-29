@@ -615,7 +615,7 @@ class MarketGame:
             lines.append(env_line)
         # 季节倒计时——最后2天提醒
         if getattr(self, '_season_ending', False):
-            next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4]
+            next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4] if self.season in SEASONS else self.season
             leaving = [name for name, v in VEGGIES.items()
                        if v["season"].get(self.season, "no") == "in"
                        and v["season"].get(next_season, "no") == "no"
@@ -1029,7 +1029,7 @@ class MarketGame:
                     # 季节快过标签
                     season_tag = ""
                     if getattr(self, '_season_ending', False):
-                        next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4]
+                        next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4] if self.season in SEASONS else self.season
                         if v["season"].get(next_season, "no") == "no" and v["season"].get(self.season, "no") == "in":
                             season_tag = " ⏳"
                     lines.append(f"  {vname}{season_tag} · {price}元/{v['unit']} · {hint}{q_tag}")
@@ -1060,14 +1060,16 @@ class MarketGame:
             for item in self.basket:
                 frag = FRAGILE_LEVEL.get(item["name"], 1)
                 if frag >= 3 and (self.rng() % 100) / 100 < 0.15:
-                    # 极脆品磕碰
-                    if item["quality"] not in ("damaged",):
+                    # 极脆品磕碰（同一物品只降一次）
+                    if not item.get("_bumped"):
                         old_q = item["quality"]
                         item["quality"] = "ok" if old_q in ("great", "good") else "bad"
+                        item["_bumped"] = True
                         lines.append(f"⚠ 路过挤了一下，{item['name']}碰了——角上碎了一点。")
                 elif frag >= 2 and (self.rng() % 100) / 100 < 0.05:
-                    if item["quality"] == "great":
+                    if item["quality"] == "great" and not item.get("_bumped"):
                         item["quality"] = "good"
+                        item["_bumped"] = True
                         lines.append(f"（{item['name']}蹭了一下，问题不大。）")
 
         lines.append("")
@@ -2468,14 +2470,11 @@ class MarketGame:
                 # 追踪最近有没有推进
                 if not hasattr(self, '_stall_cook_count'):
                     self._stall_cook_count = 0
-                # 检查最后一步是否推进了recipe
-                last_step_advanced = False
-                if ks.get("completed_steps") and ks.get("steps"):
-                    last_step_id = ks["steps"][-1] if isinstance(ks["steps"][-1], str) else None
-                    if last_step_id and last_step_id in ks["completed_steps"]:
-                        last_step_advanced = any(s["id"] == last_step_id for s in recipe["required"])
-                if last_step_advanced:
-                    self._stall_cook_count = 0  # 推进了，重置
+                # 检查completed_steps里是否有recipe的步骤
+                # （不能用steps[-1]比对——steps存文本，completed_steps存id）
+                recipe_ids = {s["id"] for s in recipe["required"]}
+                if recipe_ids & ks.get("completed_steps", set()):
+                    self._stall_cook_count = 0  # 有推进，重置
                 else:
                     self._stall_cook_count += 1
                 if self._stall_cook_count >= 2:
@@ -2554,7 +2553,8 @@ class MarketGame:
                 prev_name = prev.get("name", "炒菜")
                 prev_items = "、".join(prev.get("items", []))
                 prev_app = prev.get("appearance", "ok")
-                lines.append(f"  {prev_name}（{prev_items}）{prev_app}")
+                app_zh = {"great": "极好", "good": "不错", "ok": "一般", "bad": "不太行", "terrible": "砸了"}.get(prev_app, "一般")
+                lines.append(f"  {prev_name}（{prev_items}）{app_zh}")
             self.done = True
             self.save()
             lines.append("")
@@ -2922,7 +2922,7 @@ class MarketGame:
                             hooks.append(f"〔{chain['title']}〕也许明天会有新进展")
                             break
         # 季节食材快没了
-        season_next = SEASONS[(SEASONS.index(self.season) + 1) % 4]
+        season_next = SEASONS[(SEASONS.index(self.season) + 1) % 4] if self.season in SEASONS else self.season
         leaving = [name for name, v in VEGGIES.items()
                    if v["season"].get(self.season, "no") == "in"
                    and v["season"].get(season_next, "no") == "no"
@@ -4553,7 +4553,7 @@ class MarketGame:
             if affection >= 70:
                 # 季节倒计时提醒
                 if getattr(self, '_season_ending', False):
-                    next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4]
+                    next_season = SEASONS[(SEASONS.index(self.season) + 1) % 4] if self.season in SEASONS else self.season
                     leaving = [name for name, v in VEGGIES.items()
                                if v["season"].get(self.season, "no") == "in"
                                and v["season"].get(next_season, "no") == "no"
@@ -4879,8 +4879,15 @@ class MarketGame:
                             return f"记住了：{vname}要{word}的"
                     return f"什么口感？「记得 {vname}要脆的」"
             # 模糊匹配
-            for vname_candidate in [v for v in VEGGIES if any(v in text for v in [v])]:
-                pass  # 精确匹配已覆盖
+            for word in text.replace("要", "").replace("口感", "").replace("她", "").replace("的", "").strip().split():
+                matched = self._fuzzy_match_item(word)
+                if matched:
+                    for tex in ["脆", "嫩", "烂", "面", "溏心", "全熟", "筋道", "软", "硬"]:
+                        if tex in text:
+                            p["texture"][matched] = tex
+                            self.save()
+                            return f"记住了：{matched}要{tex}的"
+                    return f"什么口感？「记得 {matched}要脆的」"
             return "哪种菜？「记得 土豆要脆的」"
 
         return "怎么说？试试：「记得 她爱吃虾」「记得 她不吃香菜」「记得 土豆要脆的」"
@@ -4966,7 +4973,7 @@ class MarketGame:
         lines = []
         lines.append("── 她的口味 ──")
 
-        if not p["loves"] and not p["dislikes"] and not p["fears"] and not p["texture"]:
+        if not p["loves"] and not p["dislikes"] and not p["fears"] and not p["texture"] and not p.get("seasoning"):
             lines.append("还没记住什么。用「记得」告诉她吧。")
             lines.append("「记得 她爱吃虾」「记得 她不吃香菜」「记得 土豆要脆的」")
         else:
@@ -4986,6 +4993,10 @@ class MarketGame:
                 lines.append("口感：")
                 for item, pref in p["texture"].items():
                     lines.append(f"  {item}要{pref}的")
+            if p.get("seasoning"):
+                lines.append("调味：")
+                for key, val in p["seasoning"].items():
+                    lines.append(f"  {key}：{val}")
 
         if self.wife_state:
             lines.append(f"\n今日状态：{self.wife_state}")
@@ -5501,7 +5512,7 @@ class MarketGame:
             quality = reward.get("quality", "ok")
             qty = reward.get("qty", 1)
             note = reward.get("note", "")
-            self.basket.append({"name": item_name, "quality": quality, "qty": qty, "price": 0, "stall": self.current_stall or "", "owner": "", "free": True})
+            self.basket.append({"name": item_name, "quality": quality, "qty": qty, "price": 0, "stall": self.current_stall or "", "owner": "", "_free": True})
             self.encyclopedia["items_bought"].add(item_name)
             note_str = f"（{note}）" if note else ""
             lines.append(f"🎁 获得：{item_name} ×{qty} [{quality}]{note_str}")

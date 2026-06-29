@@ -121,6 +121,7 @@ VEGGIES = {
     "板栗": {"cat": "调味", "season": {"春": "no", "夏": "no", "秋": "in", "冬": "ok"}, "price": [8, 15], "unit": "斤", "fresh_hint": {"good": "壳亮、掂着沉、摇着没声", "bad": "壳发暗、轻飘飘、有虫眼"}},
     "烤红薯": {"cat": "根茎", "season": {"春": "no", "夏": "no", "秋": "ok", "冬": "in"}, "price": [3, 8], "unit": "个", "fresh_hint": {"good": "皮焦香、按着软、冒热气", "bad": "皮发硬、凉了、有黑斑"}},
     "蒜黄": {"cat": "绿叶", "season": {"春": "ok", "夏": "no", "秋": "ok", "冬": "in"}, "price": [3, 6], "unit": "把", "fresh_hint": {"good": "黄白嫩、蒜香浓、挺实", "bad": "发蔫、发黑、有水渍"}},
+    "雪里蕻": {"cat": "绿叶", "season": {"春": "ok", "夏": "no", "秋": "in", "冬": "ok"}, "price": [2, 4], "unit": "把", "fresh_hint": {"good": "翠绿带花、梗脆叶嫩", "bad": "发黄、烂叶、有水渍"}},
 }
 
 # ---- 保鲜天数（放冰箱能放几天，0=当天必须吃） ----
@@ -156,7 +157,7 @@ KEEP_DAYS = {
     "自家小番茄": 3, "迷你南瓜": 10, "辣椒苗": 7, "土鸡蛋": 14, "大闸蟹": 0,
     "冻虾仁": 30, "冰鲜带鱼": 7, "冻豆腐": 30, "速冻毛豆": 30,
     "香椿": 1, "荠菜": 1, "豌豆苗": 1, "莲蓬": 1, "菱角": 2,
-    "板栗": 14, "烤红薯": 0, "蒜黄": 2,
+    "板栗": 14, "烤红薯": 0, "蒜黄": 2, "雪里蕻": 3,
 }
 
 # ---- 出成率（可食用部分占比%） ----
@@ -194,7 +195,7 @@ YIELD_PCT = {
     "薄荷": 70, "紫苏": 70, "九层塔": 65, "香茅": 60,
     "自家小番茄": 90, "迷你南瓜": 70, "辣椒苗": 50, "土鸡蛋": 95, "大闸蟹": 40,
     "香椿": 75, "荠菜": 80, "豌豆苗": 80, "莲蓬": 50, "菱角": 55,
-    "板栗": 60, "烤红薯": 90, "蒜黄": 75,
+    "板栗": 60, "烤红薯": 90, "蒜黄": 75, "雪里蕻": 70,
 }
 
 # ---- 易碎/易坏等级(1-3) ----
@@ -233,7 +234,7 @@ FRAGILE_LEVEL = {
     "薄荷": 2, "紫苏": 2, "九层塔": 3, "香茅": 2,
     "自家小番茄": 3, "迷你南瓜": 1, "辣椒苗": 2, "土鸡蛋": 3, "大闸蟹": 3,
     "香椿": 2, "荠菜": 2, "豌豆苗": 3, "莲蓬": 2, "菱角": 2,
-    "板栗": 1, "烤红薯": 3, "蒜黄": 2,
+    "板栗": 1, "烤红薯": 3, "蒜黄": 2, "雪里蕻": 2,
 }
 
 # ---- 毛重损耗类型（摊主增重套路）----
@@ -423,7 +424,7 @@ STALLS = [
         "name": "王姐蔬菜",
         "owner": "王姐",
         "personality": "话唠",
-        "sells": ["小白菜", "大白菜", "上海青", "菠菜", "生菜", "空心菜", "苋菜", "茼蒿"],
+        "sells": ["小白菜", "大白菜", "上海青", "菠菜", "生菜", "空心菜", "苋菜", "茼蒿", "雪里蕻"],
         "catchphrase": "来来来，今天的菜水灵！",
         "milestones": [
             {
@@ -3253,8 +3254,31 @@ SECRET_AREAS = {
     "stairway_kitchen": {"id": "stairway_kitchen", "name": "楼梯间小灶", "desc": "二楼拐角的楼梯间，本来是堆杂物的。老吴不知道什么时候搬了个煤气灶进来，墙上挂着一口砂锅，调料瓶排了一排。空间刚够一个人转身，但香味飘出去半条走廊。老吴偶尔在这里偷着给自己炖一锅，说是'试验品'——其实是他最拿手的私房菜。", "unlock_condition": {"any_affection": 50, "bought_items": {"香菇": 3, "平菇": 3, "金针菇": 3, "_min_total": 3}}, "unlock_text": "你又在老吴摊前挑菌菇，他突然抬头看了看周围——「你跟我来一下。」他带你上了二楼，拐进楼梯间，里面居然有个灶。", "sells": [], "owner": "老吴", "personality": "算计", "catchphrase": "别跟别人说。", "reward": {"recipe": "老吴私房菌菇煲"}},
 }
 
+# 补充索引：流动摊和秘密区域
+for ws in WANDERING_STALLS:
+    ws_sells = ws.get("sells", [])
+    if isinstance(ws_sells, dict):
+        for _season, items in ws_sells.items():
+            for item in items:
+                if item not in ITEM_STALL_INDEX:
+                    ITEM_STALL_INDEX[item] = []
+                if ws["id"] not in ITEM_STALL_INDEX[item]:
+                    ITEM_STALL_INDEX[item].append(ws["id"])
+    else:
+        for item in ws_sells:
+            if item not in ITEM_STALL_INDEX:
+                ITEM_STALL_INDEX[item] = []
+            if ws["id"] not in ITEM_STALL_INDEX[item]:
+                ITEM_STALL_INDEX[item].append(ws["id"])
+for _area_key, area in SECRET_AREAS.items():
+    for item in area.get("sells", []):
+        if item not in ITEM_STALL_INDEX:
+            ITEM_STALL_INDEX[item] = []
+        if area["id"] not in ITEM_STALL_INDEX[item]:
+            ITEM_STALL_INDEX[item].append(area["id"])
+
 AFFECTION_MILESTONES = [
-    {"id": "wude_recipe", "stall": "mush_1", "affection": 60, "trigger_text": "老吴看了一眼周围，压低声音：「你天天来……我跟你讲个事。」他从围裙口袋里掏出一张发黄的纸片——「这是我奶奶的方子。你拿去。」", "reward": {"recipe": "老吴祖传菌菇汤"}},
+    {"id": "wude_recipe", "stall": "mushroom_1", "affection": 60, "trigger_text": "老吴看了一眼周围，压低声音：「你天天来……我跟你讲个事。」他从围裙口袋里掏出一张发黄的纸片——「这是我奶奶的方子。你拿去。」", "reward": {"recipe": "老吴祖传菌菇汤"}},
     {"id": "pangge_recipe", "stall": "meat_1", "affection": 60, "trigger_text": "胖哥擦了擦手，从案板底下抽出一个旧本子——「我红烧肉的诀窍，就这几行字。你看得懂就看，看不懂我教你。」", "reward": {"recipe": "胖哥秘制红烧肉"}},
     {"id": "hedaye_backdoor", "stall": "fish_1", "affection": 50, "trigger_text": "何大爷朝鱼桶后面看了一眼——「桶底还有一条，没摆出来。你要？」他从暗处捞出一条活蹦乱跳的鱼。", "reward": {"item": {"name": "何大爷私藏鱼", "quality": "great", "price": 0}}},
     {"id": "wangjie_pickle", "stall": "veg_1", "affection": 70, "trigger_text": "王姐四下看了看，从台子下面搬出一个坛子——「我家腌的雪里蕻，我妈传下来的。」她给你夹了一小碟。", "reward": {"recipe": "王姐家腌雪里蕻"}},
