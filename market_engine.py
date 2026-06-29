@@ -43,6 +43,8 @@ from market_data import (
     PLAYER_SKILLS,
     MARKET_DISASTERS,
     ITEM_SENSE_PREP,
+    VENDOR_STORYLINES,
+    SOLAR_TERMS, SOLAR_TERM_EVENTS,
 )
 from market_quality import QUALITY_DESC, TRAP_TRUTH
 from market_recipes import RECIPES
@@ -173,6 +175,8 @@ class MarketGame:
         self._season_ending = False
         self._journey_text = ""
         self._journey_shown = False
+        self._today_solar_term = None  # 当天节气事件
+        self.storyline_state = {}  # {vendor_name: {"arc": arc_name, "day": day_num}}
 
     # ---- 存档 ----
 
@@ -278,6 +282,8 @@ class MarketGame:
             "player_skills": getattr(self, "player_skills", {"刀工": 0, "火候": 0, "识货": 0}),
             "dish_feedback": getattr(self, "dish_feedback", {}),
             "dish_history": getattr(self, "dish_history", {}),
+            "rt_storyline_state": getattr(self, "storyline_state", {}),
+            "rt_solar_term": getattr(self, '_today_solar_term', None),
         }
         with open(SAVE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -405,6 +411,8 @@ class MarketGame:
         self.dish_feedback = data.get("dish_feedback", {})
         # dish_history: {菜名: [{day, appearance}]} 每次做菜的品相记录
         self.dish_history = data.get("dish_history", {})
+        self.storyline_state = data.get("rt_storyline_state", {})
+        self._today_solar_term = data.get("rt_solar_term", None)
         return True
 
     # ---- 新一局 ----
@@ -545,6 +553,7 @@ class MarketGame:
         # 每日状态roll——每个摊主今天的心情/状态不一样
         self._owner_daily = {}
         self._daily_chat_gain = set()  # 重置每日聊天好感冷却
+        self._storyline_effects = {}   # 重置连续剧情当日效果
         for stall in STALLS:
             sid = stall["id"]
             r = (self.rng() % 100) / 100
@@ -601,6 +610,19 @@ class MarketGame:
                         open_stalls.pop(idx)
                 break  # 每天最多一个灾难
 
+        # ── 推进连续剧情 ──
+        for vendor in list(self.storyline_state.keys()):
+            state = self.storyline_state[vendor]
+            state["day"] += 1
+            storyline = next((s for s in VENDOR_STORYLINES if s["vendor"] == vendor and s["arc"] == state["arc"]), None)
+            if storyline and state["day"] > len(storyline["days"]):
+                del self.storyline_state[vendor]
+
+        # ── 节气事件 ──
+        self._today_solar_term = self._check_solar_term()
+        if self._today_solar_term:
+            self._apply_solar_term_effects(self._today_solar_term)
+
         self.save()
         return self._day_header(expired)
 
@@ -638,6 +660,10 @@ class MarketGame:
             tip = d.get("tip", "")
             if tip:
                 lines.append(f"⚡ {tip}")
+        # 节气
+        if self._today_solar_term:
+            lines.append("")
+            lines.append(f"🌿 {self._today_solar_term['text']}")
         # 你告诉过他的状态——他记着呢
         if self.wife_state:
             lines.append(self.wife_state)
@@ -664,6 +690,69 @@ class MarketGame:
         lines.append("")
         lines.append("📖 " + self._status_bar())
         return "\n".join(lines)
+
+    # ---- 节气系统 ----
+
+    def _check_solar_term(self):
+        """用真实日期查今天是否是节气日，返回事件dict或None"""
+        now = time.localtime()
+        month, day = now.tm_mon, now.tm_mday
+        for m, d, name in SOLAR_TERMS:
+            if m == month and d == day:
+                return SOLAR_TERM_EVENTS.get(name)
+        return None
+
+    def _apply_solar_term_effects(self, event):
+        """应用节气效果到当天状态"""
+        fx = event.get("effect", {})
+        # 免费物品
+        if "item" in fx:
+            item_name = fx["item"]
+            quality = fx.get("quality", "ok")
+            stall_id = fx.get("stall", "")
+            self.basket.append({
+                "name": item_name,
+                "quality": quality,
+                "qty": 1,
+                "price": 0,
+                "stall": stall_id,
+                "owner": STALL_BY_ID.get(stall_id, {}).get("owner", ""),
+                "_free": True,
+            })
+            if hasattr(self, 'encyclopedia'):
+                self.encyclopedia["items_bought"].add(item_name)
+        # 某类食材品质提升
+        if "quality_boost" in fx:
+            cat = fx["quality_boost"]
+            if not hasattr(self, '_solar_quality_boost'):
+                self._solar_quality_boost = {}
+            self._solar_quality_boost[cat] = self._solar_quality_boost.get(cat, 0) + 1
+        # 特定摊主加好感
+        if "affection" in fx:
+            for sid, val in fx["affection"].items():
+                old = self.affection.get(sid, 0)
+                self.affection[sid] = min(100, old + val)
+        # 所有认识摊主加好感
+        if "affection_all" in fx:
+            for sid in list(self.affection.keys()):
+                self.affection[sid] = min(100, self.affection[sid] + fx["affection_all"])
+        # 特定摊主价格修正
+        if "price_mod" in fx and "stall" in fx:
+            if not hasattr(self, '_solar_price_mod'):
+                self._solar_price_mod = {}
+            self._solar_price_mod[fx["stall"]] = fx["price_mod"]
+        # 所有摊主价格修正
+        if "price_mod_all" in fx:
+            self._solar_price_mod_all = fx["price_mod_all"]
+        # 砍价奖励
+        if "bargain_bonus" in fx:
+            self._solar_bargain_bonus = fx["bargain_bonus"]
+        # 品质修正
+        if "quality_mod" in fx:
+            self._solar_quality_mod = fx["quality_mod"]
+        # 稀有发现概率倍率
+        if "rare_chance" in fx:
+            self._solar_rare_mult = fx["rare_chance"]
 
     # ---- 逛菜场 ----
 
@@ -721,6 +810,66 @@ class MarketGame:
         lines.append("用「去 wander_」逛流动摊")
         lines.append("📖 " + self._status_bar())
         return "\n".join(lines)
+
+    # ---- 连续剧情 ----
+
+    def _check_storyline(self, stall_id):
+        """检查当前摊主的连续剧情，返回剧情文本或None"""
+        stall = self._find_stall(stall_id)
+        if not stall:
+            return None
+        vendor = stall["owner"]
+
+        # 已有进行中的剧情——显示当天内容
+        if vendor in self.storyline_state:
+            state = self.storyline_state[vendor]
+            storyline = next((s for s in VENDOR_STORYLINES if s["vendor"] == vendor and s["arc"] == state["arc"]), None)
+            if storyline:
+                day_idx = state["day"] - 1
+                if 0 <= day_idx < len(storyline["days"]):
+                    day_data = storyline["days"][day_idx]
+                    text = day_data["text"]
+                    # 应用当天效果
+                    effect = day_data.get("effect", {})
+                    if effect.get("affection"):
+                        self._change_affection(stall_id, effect["affection"])
+                    # 非affection效果存为临时标记，买/砍价时读取
+                    if effect.get("price_mod") or effect.get("quality_mod") or effect.get("bargain_mod"):
+                        if not hasattr(self, '_storyline_effects'):
+                            self._storyline_effects = {}
+                        self._storyline_effects[stall_id] = {
+                            "price_mod": effect.get("price_mod", 1.0),
+                            "quality_mod": effect.get("quality_mod", 0),
+                            "bargain_mod": effect.get("bargain_mod", 1.0),
+                        }
+                    return text
+            return None
+
+        # 没有进行中的剧情——随机触发新剧情（第一天不触发，概率15%）
+        if self.day < 2:
+            return None
+        if (self.rng() % 100) / 100 >= 0.15:
+            return None
+        # 找该摊主的剧情
+        candidates = [s for s in VENDOR_STORYLINES if s["stall"] == stall_id]
+        if not candidates:
+            return None
+        chosen = candidates[self.rng() % len(candidates)]
+        self.storyline_state[vendor] = {"arc": chosen["arc"], "day": 1}
+        day_data = chosen["days"][0]
+        text = day_data["text"]
+        effect = day_data.get("effect", {})
+        if effect.get("affection"):
+            self._change_affection(stall_id, effect["affection"])
+        if effect.get("price_mod") or effect.get("quality_mod") or effect.get("bargain_mod"):
+            if not hasattr(self, '_storyline_effects'):
+                self._storyline_effects = {}
+            self._storyline_effects[stall_id] = {
+                "price_mod": effect.get("price_mod", 1.0),
+                "quality_mod": effect.get("quality_mod", 0),
+                "bargain_mod": effect.get("bargain_mod", 1.0),
+            }
+        return text
 
     def visit_stall(self, stall_id):
         """逛某个摊，看有什么菜"""
@@ -854,6 +1003,12 @@ class MarketGame:
         if story_text:
             lines.append("")
             lines.append(story_text)
+
+        # 连续剧情——跨天的摊主故事弧
+        storyline_text = self._check_storyline(stall_id)
+        if storyline_text:
+            lines.append("")
+            lines.append(storyline_text)
 
         # 摊主间互动——你看到了摊主之间发生的事
         interaction = self._maybe_stall_interaction(stall_id)
@@ -1463,6 +1618,18 @@ class MarketGame:
         # 天灾人祸——砍价修正
         if hasattr(self, '_disaster_bargain_bonus') and self._disaster_bargain_bonus:
             base_chance += self._disaster_bargain_bonus
+
+        # 连续剧情——当日砍价修正
+        if hasattr(self, '_storyline_effects') and stall_id in self._storyline_effects:
+            sl_bm = self._storyline_effects[stall_id].get("bargain_mod", 1.0)
+            if sl_bm < 1.0:
+                base_chance += (1.0 - sl_bm) * 0.5  # 0.9 → +0.05
+            elif sl_bm > 1.0:
+                base_chance -= (sl_bm - 1.0) * 0.5  # 1.2 → -0.10
+
+        # 节气——砍价修正
+        if hasattr(self, '_solar_bargain_bonus'):
+            base_chance += self._solar_bargain_bonus
 
         # 策略修正——AI的话术影响成功率（只取最强匹配的一个策略）
         if tactic:
@@ -3691,6 +3858,20 @@ class MarketGame:
         if hasattr(self, '_disaster_price_mod') and self._disaster_price_mod != 1.0:
             price *= self._disaster_price_mod
 
+        # 节气——全局价格修正
+        if hasattr(self, '_solar_price_mod_all'):
+            price *= self._solar_price_mod_all
+        # 节气——特定摊主价格修正
+        if hasattr(self, '_solar_price_mod') and stall_id in self._solar_price_mod:
+            price *= self._solar_price_mod[stall_id]
+
+        # 连续剧情——当日价格修正
+        stall_id = self.current_stall or ""
+        if stall_id and hasattr(self, '_storyline_effects') and stall_id in self._storyline_effects:
+            sl_pm = self._storyline_effects[stall_id].get("price_mod", 1.0)
+            if sl_pm != 1.0:
+                price *= sl_pm
+
         # 好感度价格修正——有仇涨价，老友额外便宜
         stall_id = self.current_stall or ""
         if stall_id:
@@ -3729,6 +3910,51 @@ class MarketGame:
                     weights[4] += 0.05
             # 确保权重非负
             weights = [max(0, w) for w in weights]
+        # 连续剧情——当日品质偏移
+        stall_id = self.current_stall or ""
+        if stall_id and hasattr(self, '_storyline_effects') and stall_id in self._storyline_effects:
+            sl_qm = self._storyline_effects[stall_id].get("quality_mod", 0)
+            if sl_qm != 0:
+                if sl_qm > 0:
+                    for i in range(sl_qm):
+                        weights[0] += 0.05
+                        weights[1] += 0.05
+                        weights[3] -= 0.05
+                        weights[4] -= 0.05
+                elif sl_qm < 0:
+                    for i in range(abs(sl_qm)):
+                        weights[0] -= 0.05
+                        weights[1] -= 0.05
+                        weights[3] += 0.05
+                        weights[4] += 0.05
+                weights = [max(0, w) for w in weights]
+        # 节气——全局品质偏移
+        if hasattr(self, '_solar_quality_mod') and self._solar_quality_mod != 0:
+            sqm = self._solar_quality_mod
+            if sqm > 0:
+                for i in range(sqm):
+                    weights[0] += 0.05
+                    weights[1] += 0.05
+                    weights[3] -= 0.05
+                    weights[4] -= 0.05
+            elif sqm < 0:
+                for i in range(abs(sqm)):
+                    weights[0] -= 0.05
+                    weights[1] -= 0.05
+                    weights[3] += 0.05
+                    weights[4] += 0.05
+            weights = [max(0, w) for w in weights]
+        # 节气——特定类别品质提升
+        if hasattr(self, '_solar_quality_boost'):
+            cat = v.get("cat", "")
+            boost = self._solar_quality_boost.get(cat, 0)
+            if boost > 0:
+                for i in range(boost):
+                    weights[0] += 0.08
+                    weights[1] += 0.07
+                    weights[3] -= 0.08
+                    weights[4] -= 0.07
+                weights = [max(0, w) for w in weights]
         # 好感度品质偏移——熟人给你留好的，生人/有仇的给你差的
         stall_id = self.current_stall or ""
         if stall_id:
@@ -5433,6 +5659,9 @@ class MarketGame:
             chance = rarity.get("chance", 0.01)
             if self._rare_boost_today:
                 chance *= 2
+            # 节气——稀有发现概率倍率
+            if hasattr(self, '_solar_rare_mult'):
+                chance *= self._solar_rare_mult
             if (self.rng() % 10000) / 10000 < chance:
                 setattr(self, found_key, True)
                 tag = rarity.get("tag", "?")
