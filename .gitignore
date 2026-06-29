@@ -1,12 +1,21 @@
 # 运行时生成
 market_save.json
+market_engine_save.json
+上桌/market_save.json
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+
+# 构建产物（用 build_blind.py 重新生成）
+market_blind.py
 
 # IDE
 .vscode/
 .idea/
-market_engine_save.json
+
+# OS
+Thumbs.db
+.DS_Store
