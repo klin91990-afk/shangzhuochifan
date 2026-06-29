@@ -683,7 +683,7 @@ class MarketGame:
                 familiar = " [熟客]"
             elif vc >= 1:
                 familiar = " [来过]"
-            lines.append(f"  {cat_emoji} {s['name']}（{s['owner']}·{s['personality']}）{familiar} — {count}种{sold_out_note}")
+            lines.append(f"  {cat_emoji} {s['name']}［{sid}］（{s['owner']}·{s['personality']}）{familiar} — {count}种{sold_out_note}")
 
         # 流动奇遇摊位
         for ws in WANDERING_STALLS:
@@ -1458,8 +1458,8 @@ class MarketGame:
             # 砍价成功
             discount = round(price * (0.1 + (self.rng() % 20) / 100), 1)
             new_price = round(price - discount, 1)
-            if new_price < 1:
-                new_price = round(price * 0.8, 1)
+            if new_price < 0.5:
+                new_price = max(0.5, round(price * 0.8, 1))
 
             pool = BARGAIN_LINES[personality]["accept"]
             line = pool[self.rng() % len(pool)]
@@ -1753,8 +1753,16 @@ class MarketGame:
                             and item["name"] not in in_pot
                             and item["name"] not in on_board]
                 if unhandled and any(v in step_full for v in ["炒", "煮", "炖", "煎", "炸", "烧", "蒸", "焖"]):
-                    step_full = step_full.replace("炒", f"炒{''.join(unhandled)}", 1) \
-                               if "炒" in step_full else step_full
+                    # 在第一个烹饪动词前插入食材，而不是替换动词字符
+                    insert_pos = -1
+                    for verb in ["炒", "煮", "炖", "煎", "炸", "烧", "蒸", "焖"]:
+                        idx = step_full.find(verb)
+                        if idx >= 0 and (insert_pos < 0 or idx < insert_pos):
+                            insert_pos = idx
+                    if insert_pos >= 0:
+                        # 在动词后面插入食材名
+                        verb_char = step_full[insert_pos]
+                        step_full = step_full[:insert_pos+1] + "".join(unhandled) + step_full[insert_pos+1:]
 
             # 调用cook_step
             result = self.cook_step(step_full)
@@ -3214,7 +3222,14 @@ class MarketGame:
         return "、".join(parts)
 
     def _find_stall(self, stall_id):
-        return STALL_BY_ID.get(stall_id)
+        stall = STALL_BY_ID.get(stall_id)
+        if stall:
+            return stall
+        # 模糊匹配：摊主名字或摊位名
+        for s in STALLS:
+            if stall_id in s["name"] or stall_id in s.get("owner", ""):
+                return s
+        return None
 
     def _find_stall_selling(self, item_name):
         """找到卖某样菜的摊（随机选一个）"""
@@ -3515,7 +3530,7 @@ class MarketGame:
     def _calc_price(self, item_name, v):
         """计算实际价格（季节+天气+时段+跨摊关系影响）"""
         base_lo, base_hi = v["price"]
-        price = base_lo + (base_lo + (self.rng() % max(1, int((base_hi - base_lo) * 10)))) / 10
+        price = base_lo + (self.rng() % max(1, int((base_hi - base_lo) * 10))) / 10
 
         season_status = v["season"].get(self.season, "no")
         if season_status == "in":
@@ -3615,6 +3630,9 @@ class MarketGame:
                 weights[3] += 0.05
                 weights[4] += 0.05
             weights = [max(0, w) for w in weights]
+        # 权重全零时回退到默认
+        if sum(weights) <= 0:
+            weights = [0.1, 0.3, 0.4, 0.15, 0.05]
         # 累积判定
         cumul = 0
         for i, w in enumerate(weights):
