@@ -90,8 +90,8 @@ def mulberry32(seed):
         nonlocal seed
         seed = (seed + 0x6D2B79F5) & 0xFFFFFFFF
         t = seed
-        t = ((t ^ (t >> 15)) * t | 1) & 0xFFFFFFFF
-        t = ((t ^ (t >> 15)) * t | 1) & 0xFFFFFFFF
+        t = ((t ^ (t >> 15)) * (t | 1)) & 0xFFFFFFFF
+        t = ((t ^ (t >> 15)) * (t | 1)) & 0xFFFFFFFF
         t = (t ^ (t >> 15)) & 0xFFFFFFFF
         return t
     return _next
