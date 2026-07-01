@@ -1,0 +1,23 @@
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+
+from mcp.server.fastmcp import FastMCP
+from market_engine import MarketGame
+
+mcp = FastMCP("买菜做饭")
+game = MarketGame()
+
+@mcp.tool()
+def market_cmd(command: str) -> str:
+    """执行买菜做饭游戏指令。可用指令：新局/开始/菜场/看看/去 摊位id/买 菜名/砍价 菜名 话术/回家/做 菜名/做法 描述/出锅/聊/细看 菜名/她说 内容/记得 内容/冰箱/状态/口味/成就/图鉴/菜谱/技能/帮助"""
+    return game.cmd(command)
+
+@mcp.tool()
+def market_new_game() -> str:
+    """重新开始买菜做饭游戏（清除存档）"""
+    global game
+    game = MarketGame()
+    return game.cmd("新局")
+
+if __name__ == "__main__":
+    mcp.run(transport="sse")
