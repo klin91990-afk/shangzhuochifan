@@ -1,6 +1,4 @@
-import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
-
+import os
 from mcp.server.fastmcp import FastMCP
 from market_engine import MarketGame
 
@@ -20,4 +18,5 @@ def market_new_game() -> str:
     return game.cmd("新局")
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
