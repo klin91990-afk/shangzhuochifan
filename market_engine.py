@@ -5280,6 +5280,21 @@ class MarketGame:
         if instruction in ("新局", "new", "开始"):
             return self.new_day()
 
+        # 回退天数——"回退3"回到3天前
+        if instruction.startswith("回退"):
+            try:
+                back = int(instruction[2:].strip())
+            except (ValueError, IndexError):
+                back = 1
+            target = max(1, self.day - back)
+            self.day = target
+            # 重算季节
+            si = ((self.day - 1) // DAYS_PER_SEASON) % 4
+            self.season = SEASONS[si]
+            self._season_day = ((self.day - 1) % DAYS_PER_SEASON) + 1
+            self.save()
+            return f"⏪ 回退到第{self.day}天 · {self.season}（第{self._season_day}天）\n菜场和天气已刷新，输入'菜场'重新逛。"
+
         # 看菜场
         if instruction in ("菜场", "看看", "逛逛", "市场"):
             return self.look_stalls()
