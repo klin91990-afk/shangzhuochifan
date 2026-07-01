@@ -2,7 +2,8 @@ import os
 from mcp.server.fastmcp import FastMCP
 from market_engine import MarketGame
 
-mcp = FastMCP("买菜做饭")
+port = int(os.environ.get("PORT", 8000))
+mcp = FastMCP("买菜做饭", host="0.0.0.0", port=port)
 game = MarketGame()
 
 @mcp.tool()
@@ -18,5 +19,4 @@ def market_new_game() -> str:
     return game.cmd("新局")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    mcp.run(transport="sse", port=port)
+    mcp.run(transport="sse")
