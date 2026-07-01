@@ -5276,8 +5276,8 @@ class MarketGame:
         if self.day == 0:
             self.new_day()
 
-        # 新局
-        if instruction in ("新局", "new", "开始"):
+        # 新局——需要明确的"新局"指令，防止AI误触
+        if instruction == "新局":
             return self.new_day()
 
         # 回退天数——"回退3"回到3天前
